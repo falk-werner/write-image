@@ -3,10 +3,14 @@
 from dataclasses import dataclass
 import subprocess
 import json
+import os
+import hashlib
 
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 from tkinterdnd2 import DND_FILES, TkinterDnD
+
+CHUNK_SIZE = 100 * 1024
 
 def list_removable_devices():
     result = subprocess.run(["lsblk", "-a", "--json"],
@@ -36,7 +40,58 @@ def update_devices(device_chooser):
     device_chooser.current(0)
 
 def write_image(device, filename):
-    messagebox.showerror(title="Error", message="Not implemented.")
+    if not os.path.isfile(filename):
+        messagebox.showerror(title="Error", message="File not found")
+        return
+    file_size = os.path.getsize(filename)
+
+    # umount 
+    for file in os.listdir("/dev/"):
+        if file.startswith(device) and len(file) > len(device):
+            result = subprocess.run(["umount", f"/dev/{file}"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False)
+            if result.returncode != 0:
+                print(f"warn: failed to unmount /dev/{file}: {result.stderr.strip()}")
+    
+    # write image
+    checksum = hashlib.sha256()
+    try:
+        with open(filename, "rb") as input_file:
+            with open(f"/dev/{device}", "wb") as output_file:
+                remaining = file_size
+                while remaining > 0:
+                    buffer = input_file.read(min(CHUNK_SIZE, remaining))
+                    if not buffer:
+                        break
+                    remaining -= len(buffer)
+                    checksum.update(buffer)
+                    output_file.write(buffer)
+    except:
+        messagebox.showerror(title="Error", message="Failed to write image to device")
+        return
+    hash = checksum.hexdigest()
+
+    # check image
+    checksum = hashlib.sha256()
+    try:
+        with open(f"/dev/{device}", "rb") as input_file:
+            remaining = file_size
+            while remaining > 0:
+                buffer = input_file.read(min(CHUNK_SIZE, remaining))
+                if not buffer:
+                    break
+                remaining -= len(buffer)
+                checksum.update(buffer)                
+    except:
+        messagebox.showerror(title="Error", message="Failed to check image")
+        return
+
+    if hash != checksum.hexdigest():
+        messagebox.showerror(title="Error", message="Invalid checksum")
+        return
+
+    messagebox.showinfo(title="Completed", message="Image successfully flashed")
+    
+
 
 def main():
     root = TkinterDnD.Tk()
