@@ -12,6 +12,115 @@ from tkinterdnd2 import DND_FILES, TkinterDnD
 
 CHUNK_SIZE = 100 * 1024
 
+class WriteImageContext:
+    device: str
+    filename: str
+    progressbar: None
+    state: str
+    error_message: str
+    file_size: int
+    remaining: int
+    device_file: None
+    image_file: None
+    write_checksum: None
+    check_checksum: None
+
+    def __init__(self, ):
+        self.progessbar = None
+        self.state = "uninitialized"
+
+    def reset(self, device, filename):
+        self.device = device
+        self.filename = filename
+        self.error_message = None
+        self.file_size = 0
+        self.remaining = 0
+        self.device_file = None
+        self.image_file = None
+        self.write_checksum = hashlib.sha256()
+        self.check_checksum = hashlib.sha256()
+        self.state = "init"
+
+    def cleanup(self):
+        if self.device_file is not None:
+            self.device_file.close()
+            self.device_file = None
+        if self.image_file is not None:
+            self.image_file.close()
+            self.image_file = None
+        self.state = "uninitialized"
+
+    def next(self) -> bool:
+        if self.state == "init":
+            if not os.path.isfile(self.filename):
+                self.error_message = "Image file not found"
+                self.state = "error"
+                return false
+            self.file_size = os.path.getsize(self.filename)
+            self.progressbar["maximum"] = self.file_size
+            self.progressbar["value"] = 0
+            self.remaining = self.file_size
+            # umount 
+            for file in os.listdir("/dev/"):
+                if file.startswith(self.device) and len(file) > len(self.device):
+                    result = subprocess.run(["umount", f"/dev/{file}"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False)
+                    if result.returncode != 0:
+                        print(f"warn: failed to unmount /dev/{file}: {result.stderr.strip()}")
+            self.device_file = open(f"/dev/{self.device}", "wb")
+            self.image_file = open(self.filename, "rb")
+            self.state = "write"
+            return True
+        elif self.state == "write":
+            if self.remaining == 0:
+                self.device_file.close()
+                self.device_file = open(f"/dev/{self.device}", "rb")
+                self.image_file.close()
+                self.image_file = None
+                self.remaining = self.file_size
+                self.progressbar["value"] = 0
+                self.state = "check"
+                return True
+            try:
+                buffer = self.image_file.read(min(CHUNK_SIZE, self.remaining))
+                if not buffer:
+                    self.error_message = "Failed to read image"
+                    self.state = "error"
+                    return False
+                self.remaining -= len(buffer)
+                self.write_checksum.update(buffer)
+                self.device_file.write(buffer)
+                self.progressbar["value"] = (self.file_size - self.remaining) / 2
+                return True
+            except Exception as ex:
+                self.error_message = f"Failed to write image: {ex}"
+                self.state = "error"
+                return False
+        elif self.state == "check":
+            if self.remaining == 0:
+                if self.write_checksum.hexdigest() != self.check_checksum.hexdigest():
+                    self.error_message = "Checksum error"
+                    self.state = "error"
+                    return False
+                self.state = "done"
+                return False
+            try:
+                buffer = self.device_file.read(min(CHUNK_SIZE, self.remaining))
+                if not buffer:
+                    self.error_message = "Failed to read image"
+                    self.state = "error"
+                    return False
+                self.remaining -= len(buffer)
+                self.check_checksum.update(buffer)
+                self.progressbar["value"] = self.file_size - (self.remaining  / 2)
+                return True
+            except Exception as ex:
+                self.error_message = f"Failed to read image: {ex}"
+                self.state = "error"
+                return False
+        else:
+            return False
+
+
 def list_removable_devices():
     result = subprocess.run(["lsblk", "-a", "--json"],
         check=True, stdout=subprocess.PIPE, text=True)
@@ -39,59 +148,20 @@ def update_devices(device_chooser):
     device_chooser['values'] = devices
     device_chooser.current(0)
 
-def write_image(device, filename):
-    if not os.path.isfile(filename):
-        messagebox.showerror(title="Error", message="File not found")
-        return
-    file_size = os.path.getsize(filename)
-
-    # umount 
-    for file in os.listdir("/dev/"):
-        if file.startswith(device) and len(file) > len(device):
-            result = subprocess.run(["umount", f"/dev/{file}"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False)
-            if result.returncode != 0:
-                print(f"warn: failed to unmount /dev/{file}: {result.stderr.strip()}")
+def write_image_start(root, context, device, filename):
+    context.reset(device, filename)
+    root.event_generate("<<WriteImageNext>>", when="tail")
     
-    # write image
-    checksum = hashlib.sha256()
-    try:
-        with open(filename, "rb") as input_file:
-            with open(f"/dev/{device}", "wb") as output_file:
-                remaining = file_size
-                while remaining > 0:
-                    buffer = input_file.read(min(CHUNK_SIZE, remaining))
-                    if not buffer:
-                        break
-                    remaining -= len(buffer)
-                    checksum.update(buffer)
-                    output_file.write(buffer)
-    except:
-        messagebox.showerror(title="Error", message="Failed to write image to device")
-        return
-    hash = checksum.hexdigest()
-
-    # check image
-    checksum = hashlib.sha256()
-    try:
-        with open(f"/dev/{device}", "rb") as input_file:
-            remaining = file_size
-            while remaining > 0:
-                buffer = input_file.read(min(CHUNK_SIZE, remaining))
-                if not buffer:
-                    break
-                remaining -= len(buffer)
-                checksum.update(buffer)                
-    except:
-        messagebox.showerror(title="Error", message="Failed to check image")
-        return
-
-    if hash != checksum.hexdigest():
-        messagebox.showerror(title="Error", message="Invalid checksum")
-        return
-
-    messagebox.showinfo(title="Completed", message="Image successfully flashed")
-    
-
+def write_image_next(root, context):
+    if context.next():
+        root.update()
+        root.event_generate("<<WriteImageNext>>", when="tail")
+    else:
+        if context.state == "error":
+            messagebox.showerror(title="Error", message=context.error_message)
+        else:
+            messagebox.showinfo(title="Completed", message="Image successfully flashed")
+        context.cleanup()
 
 def main():
     root = TkinterDnD.Tk()
@@ -99,6 +169,7 @@ def main():
     root.resizable(height=False, width=False)
 
     filename = tk.StringVar()
+    context = WriteImageContext()
 
     logo = tk.PhotoImage(file="logo.png").subsample(3,3)
     drop_area = tk.Label(root, image=logo, relief=tk.RAISED)
@@ -130,11 +201,17 @@ def main():
 
     choose_file_button = tk.Button(root, text="Choose File...",
         command=lambda: choose_file(filename))
-    choose_file_button.grid(row=1, column=3, padx=5, pady=5, stick=tk.EW)
+    choose_file_button.grid(row=1, column=3, padx=5, pady=5, sticky=tk.EW)
 
     write_image_button = tk.Button(root, text="Write Image",
-        command=lambda: write_image(device_name.get(), filename.get()))
-    write_image_button.grid(row=2, column=3, padx=5, pady=5, stick=tk.EW)
+        command=lambda: write_image_start(root, context, device_name.get(), filename.get()))
+    write_image_button.grid(row=2, column=3, padx=5, pady=5, sticky=tk.EW)
+
+    progressbar = ttk.Progressbar()
+    progressbar.grid(row=3,column=0, columnspan=4, padx=10, pady=10, sticky=tk.EW)
+
+    context.progressbar = progressbar
+    root.bind("<<WriteImageNext>>", lambda _: write_image_next(root, context))
 
     root.mainloop()
 
