@@ -5,6 +5,7 @@ import subprocess
 import json
 import os
 import hashlib
+import lzma
 
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
@@ -67,7 +68,10 @@ class WriteImageContext:
                     if result.returncode != 0:
                         print(f"warn: failed to unmount /dev/{file}: {result.stderr.strip()}")
             self.device_file = open(f"/dev/{self.device}", "wb")
-            self.image_file = open(self.filename, "rb")
+            if self.filename.endswith(".xz"):
+                self.image_file = lzma.open(self.filename, "rb")
+            else:
+                self.image_file = open(self.filename, "rb")
             self.state = "write"
             return True
         elif self.state == "write":
