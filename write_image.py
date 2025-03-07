@@ -56,6 +56,13 @@ class WriteImageContext:
                 self.error_message = "Image file not found"
                 self.state = "error"
                 return false
+            if self.filename.endswith(".xz"):
+                result = subprocess.run(["unxz", self.filename], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                if result.returncode != 0:
+                    self.error_message = "Failed to decompress image"
+                    self.state = "error"
+                    return False
+                self.filename = self.filename[:-3]
             self.file_size = os.path.getsize(self.filename)
             self.progressbar["maximum"] = self.file_size
             self.progressbar["value"] = 0
